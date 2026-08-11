@@ -39,6 +39,21 @@ function sanitizeBody(b: Record<string, unknown>): Record<string, unknown> {
 function tid(c: any): string { return sanitize(c.req.header('X-Tenant-ID') || c.req.query('tenant_id') || '', 100); }
 function json(c: any, d: unknown, s = 200) { return c.json(d, s); }
 
+function timingSafeEqual(a: string | undefined | null, b: string | undefined | null): boolean {
+  if (!a || !b) return false;
+  const enc = new TextEncoder();
+  const bufA = enc.encode(a);
+  const bufB = enc.encode(b);
+  const len = Math.max(bufA.length, bufB.length, 1);
+  const padA = new Uint8Array(len);
+  const padB = new Uint8Array(len);
+  padA.set(bufA);
+  padB.set(bufB);
+  let diff = bufA.length ^ bufB.length;
+  for (let i = 0; i < len; i++) diff |= padA[i] ^ padB[i];
+  return diff === 0;
+}
+
 function slog(level: 'info' | 'warn' | 'error', msg: string, data?: Record<string, unknown>) {
   const entry = { ts: new Date().toISOString(), level, worker: 'echo-email-marketing', version: '2.0.0', msg, ...data };
   if (level === 'error') console.error(JSON.stringify(entry));
@@ -121,10 +136,13 @@ async function rateLimit(env: Env, key: string, max: number, windowSec = 60): Pr
 // Auth
 app.use('*', async (c, next) => {
   const path = c.req.path;
-  if (path === '/health' || path === '/status' || path === '/subscribe' || path.startsWith('/track/') || path.startsWith('/unsubscribe/') || path === '/webhooks/stripe') return next();
-  if (c.req.method === 'GET') return next();
+  if (path === '/' || path === '/health' || path === '/status' || path === '/subscribe' || path.startsWith('/track/') || path.startsWith('/unsubscribe/') || path === '/webhooks/stripe') return next();
+  // GET /plans with no tenant identifier is the public pricing catalog (see the handler's own
+  // !t branch below); GET /plans?tenant_id=... returns tenant-specific billing data and must
+  // stay authenticated like every other tenant-scoped route.
+  if (path === '/plans' && c.req.method === 'GET' && !tid(c)) return next();
   const key = c.req.header('X-Echo-API-Key') || c.req.header('Authorization')?.replace('Bearer ', '');
-  if (!key || key !== c.env.ECHO_API_KEY) return json(c, { error: 'Unauthorized' }, 401);
+  if (!timingSafeEqual(key, c.env.ECHO_API_KEY)) return json(c, { error: 'Unauthorized' }, 401);
   return next();
 });
 
